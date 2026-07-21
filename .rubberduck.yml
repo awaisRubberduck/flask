@@ -1,0 +1,11 @@
+rules:
+  - id: no-hardcoded-key
+    forbid: "API_KEY ="
+    paths: ["*.py"]
+    message: Never hard-code API keys — load them from the environment.
+    severity: high
+  - id: no-md5
+    forbid: "hashlib.md5"
+    paths: ["*.py"]
+    message: MD5 is insecure — use hashlib.sha256 instead.
+    severity: medium
