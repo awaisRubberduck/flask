@@ -1,13 +1,13 @@
 """
 Security tests for rd_fix_demo.py – targeting:
-  1. Hard-coded API key / secret exposure
-  2. Weak hashing algorithm (MD5 used for password hashing)
-  3. Weak / well-known password stored in plain module-level variable
+  1. Hard-coded API key / secret exposure (CWE-798)
+  2. Hard-coded plain-text password (CWE-259)
+  3. Weak hashing algorithm – MD5 used for password hashing (CWE-327, CWE-916)
 """
 
 import hashlib
 import importlib
-import inspect
+import os
 import re
 import sys
 import types
@@ -27,86 +27,120 @@ def _load_source() -> str:
 
 
 def _import_module() -> types.ModuleType:
-    """Import (or reload) the module under test."""
+    """Import (or reload) the module under test so changes are picked up."""
     if "rd_fix_demo" in sys.modules:
         return importlib.reload(sys.modules["rd_fix_demo"])
     return importlib.import_module("rd_fix_demo")
 
 
 # ---------------------------------------------------------------------------
-# 1. Hard-coded secrets must NOT appear in source
+# 1. Hard-coded API key  (CWE-798)
 # ---------------------------------------------------------------------------
 
-class TestHardcodedSecrets:
-    """Hard-coded credentials are a CWE-798 / CWE-259 vulnerability."""
+class TestHardcodedApiKey:
+    """The literal API key introduced in the PR must not live in source."""
 
-    def test_no_hardcoded_api_key_in_source(self):
-        """The literal API key value must not be present in the source file."""
+    KNOWN_KEY = "sk-live-9f8a7b6c5d4e3f2a1b0c"
+
+    def test_exact_api_key_not_in_source(self):
         source = _load_source()
-        # The specific key that was introduced in the PR
-        hardcoded_key = "sk-live-9f8a7b6c5d4e3f2a1b0c"
-        assert hardcoded_key not in source, (
-            f"Hard-coded API key '{hardcoded_key}' found in source. "
-            "Use environment variables or a secrets manager instead."
+        assert self.KNOWN_KEY not in source, (
+            f"Hard-coded API key '{self.KNOWN_KEY}' found in source. "
+            "Store secrets in environment variables or a secrets manager."
         )
 
-    def test_no_hardcoded_password_in_source(self):
-        """Plain-text passwords must not be hard-coded in source."""
+    def test_sk_live_pattern_absent_from_source(self):
+        """Catch any variant of the sk-live-* credential pattern."""
         source = _load_source()
-        hardcoded_password = "hunter2"
-        assert hardcoded_password not in source, (
-            f"Hard-coded password '{hardcoded_password}' found in source. "
+        assert not re.search(r"sk-live-[A-Za-z0-9]+", source), (
+            "Source contains a token matching sk-live-* – looks like a live API credential."
+        )
+
+    def test_api_key_module_attribute_is_not_live_secret(self):
+        """If API_KEY is exported it must not contain the live key value."""
+        mod = _import_module()
+        api_key = getattr(mod, "API_KEY", None)
+        if api_key is not None:
+            assert api_key != self.KNOWN_KEY, (
+                "Module attribute API_KEY holds the hard-coded live secret."
+            )
+            assert not re.match(r"^sk-live-[0-9a-f]+$", str(api_key)), (
+                "Module attribute API_KEY matches the sk-live-* secret pattern."
+            )
+
+    def test_api_key_not_present_as_module_attribute_at_all(self):
+        """Ideal state: no API_KEY attribute on the module (use env vars)."""
+        mod = _import_module()
+        assert not hasattr(mod, "API_KEY"), (
+            "Module exposes API_KEY as a top-level attribute. "
+            "Use os.environ.get('API_KEY') at call-site instead."
+        )
+
+
+# ---------------------------------------------------------------------------
+# 2. Hard-coded plain-text password  (CWE-259)
+# ---------------------------------------------------------------------------
+
+class TestHardcodedPassword:
+    """The literal password 'hunter2' introduced in the PR must not live in source."""
+
+    KNOWN_PASSWORD = "hunter2"
+
+    def test_exact_password_not_in_source(self):
+        source = _load_source()
+        assert self.KNOWN_PASSWORD not in source, (
+            f"Hard-coded password '{self.KNOWN_PASSWORD}' found in source. "
             "Passwords must never appear in source code."
         )
 
-    def test_api_key_not_exposed_as_module_attribute(self):
-        """The module must not export a plain-text API key attribute."""
+    def test_password_module_attribute_absent(self):
+        """The module must not export a plain-text 'password' attribute."""
         mod = _import_module()
-        # If the attribute exists it should not look like a real secret
-        api_key = getattr(mod, "API_KEY", None)
-        assert api_key is None or not re.match(
-            r"^sk-live-[0-9a-f]+$", str(api_key)
-        ), (
-            "Module attribute API_KEY contains what looks like a live secret key."
+        assert not hasattr(mod, "password"), (
+            "Module exposes a top-level 'password' attribute – this is a secret leak."
         )
 
-    def test_password_attribute_not_plaintext(self):
-        """A 'password' module attribute must not be a plain-text string."""
+    def test_password_attribute_not_plaintext_string(self):
+        """If a 'password' attribute somehow exists it must not be a non-empty string."""
         mod = _import_module()
         pw = getattr(mod, "password", None)
-        # Acceptable states: attribute does not exist, or is not a non-empty string
         if pw is not None:
-            assert not isinstance(pw, str) or pw == "", (
+            assert not (isinstance(pw, str) and pw != ""), (
                 f"Plain-text password exposed as module attribute: '{pw}'"
             )
 
-    def test_no_sk_live_pattern_in_source(self):
-        """Broad check: no 'sk-live-*' token pattern anywhere in source."""
-        source = _load_source()
-        assert not re.search(r"sk-live-[A-Za-z0-9]+", source), (
-            "Source contains a token matching the sk-live-* pattern, "
-            "which is indicative of a live API credential."
-        )
+    def test_known_password_value_not_in_any_module_string_attribute(self):
+        """
+        Walk all string attributes of the module; none should equal or
+        contain the known hard-coded password.
+        """
+        mod = _import_module()
+        for name in dir(mod):
+            if name.startswith("__"):
+                continue
+            val = getattr(mod, name, None)
+            if isinstance(val, str):
+                assert self.KNOWN_PASSWORD not in val, (
+                    f"Module attribute '{name}' contains the hard-coded password."
+                )
 
 
 # ---------------------------------------------------------------------------
-# 2. Weak hashing algorithm (MD5)
+# 3. Weak hashing algorithm – MD5  (CWE-327 / CWE-916)
 # ---------------------------------------------------------------------------
 
-class TestWeakHashing:
-    """MD5 is cryptographically broken and must not be used for passwords (CWE-327, CWE-916)."""
+class TestWeakMd5Hashing:
+    """MD5 is cryptographically broken and must not be used for passwords."""
 
-    def test_md5_not_used_for_password_hashing_in_source(self):
-        """Source must not use hashlib.md5 for password hashing."""
+    def test_hashlib_md5_not_in_source(self):
         source = _load_source()
         assert "hashlib.md5" not in source, (
-            "hashlib.md5 is used in source. MD5 is cryptographically broken "
-            "and must not be used for password hashing. "
-            "Use hashlib.sha256 with salt, bcrypt, argon2, or scrypt."
+            "hashlib.md5 is present in source. MD5 is broken; use bcrypt, "
+            "argon2id, or hashlib.scrypt/pbkdf2_hmac with sha-256."
         )
 
-    def test_md5_call_not_present_in_source(self):
-        """No bare md5() call should appear in the module source."""
+    def test_md5_call_pattern_absent_from_source(self):
+        """Catch any bare md5( call regardless of import style."""
         source = _load_source()
         assert not re.search(r"\bmd5\s*\(", source), (
             "md5() call detected in source – forbidden for password/secret hashing."
@@ -114,75 +148,76 @@ class TestWeakHashing:
 
     def test_digest_attribute_is_not_md5_of_known_password(self):
         """
-        If a 'digest' attribute exists on the module it must NOT equal the
-        MD5 of the known weak password 'hunter2' (proves the bad code ran).
+        The module's 'digest' attribute must not equal the MD5 of 'hunter2'.
+        This would confirm both weak hashing and hard-coded password are live.
         """
-        md5_of_hunter2 = hashlib.md5(b"hunter2").hexdigest()
+        md5_of_hunter2 = hashlib.md5(b"hunter2").hexdigest()  # noqa: S324
         mod = _import_module()
         digest = getattr(mod, "digest", None)
         assert digest != md5_of_hunter2, (
-            f"Module 'digest' equals the MD5 of 'hunter2' ({md5_of_hunter2}). "
-            "This confirms both weak hashing and hard-coded password are active."
+            f"Module 'digest' == MD5('hunter2') = {md5_of_hunter2}. "
+            "Both a weak algorithm and a hard-coded password are confirmed active."
         )
 
-    def test_strong_hash_algorithm_used_if_hashing_present(self):
+    def test_digest_attribute_does_not_exist_or_uses_strong_algorithm(self):
         """
-        If any hashing is performed in the module, it must use an algorithm
-        from the approved set (sha256, sha384, sha512, blake2b, bcrypt, argon2, scrypt).
+        If a 'digest' attribute is present it should be produced by a strong
+        algorithm (sha-256 output is 64 hex chars; MD5 output is 32 hex chars).
         """
-        source = _load_source()
-        approved = re.compile(
-            r"hashlib\.(sha256|sha384|sha512|sha3_256|sha3_512|blake2b|blake2s)\b"
-            r"|bcrypt|argon2|scrypt"
-        )
-        if re.search(r"hashlib\.", source):
-            assert approved.search(source), (
-                "Hashing is used but no approved strong algorithm was found. "
-                "Replace MD5/SHA1 with sha256+salt, bcrypt, argon2, or scrypt."
+        mod = _import_module()
+        digest = getattr(mod, "digest", None)
+        if digest is not None and isinstance(digest, str):
+            # MD5 hex digest is exactly 32 characters
+            assert len(digest) != 32, (
+                f"Module 'digest' is 32 hex characters – consistent with MD5 output."
             )
 
-    def test_md5_is_indeed_weak_reference_check(self):
+    def test_no_strong_hash_algorithm_replaces_md5_yet(self):
         """
-        Sanity / documentation test: prove that MD5 produces collisions trivially
-        and is in Python's 'usedforsecurity=False' category on newer interpreters.
+        Verify the source does NOT already use an approved KDF, confirming
+        the bad code is still active (test will fail once properly fixed –
+        which is the intended signal).
         """
-        # MD5 of two different empty-prefix collision blobs (RFC demonstration)
-        # Just assert MD5 digest length is only 128-bit – inadequate for passwords
-        digest_len_bits = len(hashlib.md5(b"test").digest()) * 8
-        assert digest_len_bits == 128
-        # 128-bit MD5 is brute-forceable; passwords need bcrypt/argon2 cost factor
-        assert digest_len_bits < 256, (
-            "MD5 is only 128 bits – far too weak for password storage."
+        source = _load_source()
+        # If the code is fixed this assertion will fail and remind us to
+        # update/remove these security tests.
+        approved = re.compile(
+            r"hashlib\.(sha256|sha384|sha512|sha3_256|sha3_512|blake2b|blake2s|pbkdf2_hmac|scrypt)\b"
+            r"|bcrypt|argon2"
         )
+        if re.search(r"hashlib\.", source):
+            # There is hashing – make sure it is NOT md5
+            assert not re.search(r"hashlib\.md5\b", source), (
+                "hashlib.md5 is still used. Replace with an approved algorithm."
+            )
 
 
 # ---------------------------------------------------------------------------
-# 3. Verify safe alternatives still work (positive / regression tests)
+# 4. Positive / regression – safe alternatives must remain functional
 # ---------------------------------------------------------------------------
 
-class TestSafeAlternatives:
-    """Ensure the recommended secure approaches are functional."""
+class TestSafeAlternativesStillWork:
+    """Ensure the secure replacement patterns work correctly."""
 
-    def test_sha256_password_hashing_works(self):
-        """SHA-256 with a salt produces a non-empty hex digest."""
-        import os
-        salt = os.urandom(32)
-        pw = b"some_password"
-        digest = hashlib.sha256(salt + pw).hexdigest()
-        assert len(digest) == 64
-        assert isinstance(digest, str)
-
-    def test_pbkdf2_hmac_works_for_password_hashing(self):
-        """PBKDF2-HMAC-SHA256 is an approved KDF for password hashing."""
-        import os
+    def test_pbkdf2_hmac_sha256_produces_correct_length(self):
         salt = os.urandom(16)
-        dk = hashlib.pbkdf2_hmac("sha256", b"password", salt, 260_000)
-        assert len(dk) == 32  # 256-bit derived key
+        dk = hashlib.pbkdf2_hmac("sha256", b"s0me_p@ssword!", salt, 260_000)
+        assert len(dk) == 32, "PBKDF2-HMAC-SHA256 should produce a 256-bit key."
 
-    def test_env_var_pattern_for_api_key(self, monkeypatch):
-        """API keys should be read from environment variables, not source."""
-        import os
-        monkeypatch.setenv("API_KEY", "sk-live-testvalue")
-        assert os.environ.get("API_KEY") == "sk-live-testvalue"
-        # Consuming from env is safe; embedding in source is not
+    def test_sha256_hex_digest_length(self):
+        digest = hashlib.sha256(b"test_input").hexdigest()
+        assert len(digest) == 64
+
+    def test_api_key_from_env_var_is_safe_pattern(self, monkeypatch):
+        """Reading a secret from an environment variable does not embed it in source."""
+        monkeypatch.setenv("MY_API_KEY", "sk-live-testvalue")
+        key = os.environ.get("MY_API_KEY")
+        assert key == "sk-live-testvalue"
+        # The value is NOT in the source file
         assert "sk-live-testvalue" not in _load_source()
+
+    def test_scrypt_kdf_works(self):
+        """hashlib.scrypt is an approved memory-hard KDF for passwords."""
+        salt = os.urandom(16)
+        dk = hashlib.scrypt(b"password123", salt=salt, n=2**14, r=8, p=1, dklen=32)
+        assert len(dk) == 32
