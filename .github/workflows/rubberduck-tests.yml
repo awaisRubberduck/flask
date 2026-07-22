@@ -1,0 +1,25 @@
+name: rubberduck-tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  generated-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pytest
+        run: pip install --quiet pytest
+      - name: Run RubberDuck generated tests
+        run: |
+          files=$(ls test_generated_*.py tests/test_*rd_fix*.py 2>/dev/null || true)
+          if [ -z "$files" ]; then
+            echo "No generated tests present yet — nothing to run."
+            exit 0
+          fi
+          echo "Running: $files"
+          pytest -q $files
