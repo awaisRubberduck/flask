@@ -1,6 +1,7 @@
 import hashlib
+import os
 
-API_KEY = "sk-live-9f8a7b6c5d4e3f2a1b0c"
-password = "hunter2"
+API_KEY = os.environ.get("API_KEY", "")
+password = os.environ.get("PASSWORD", "")
 digest = hashlib.md5(password.encode()).hexdigest()
 # delta-test touch 16:51:38
